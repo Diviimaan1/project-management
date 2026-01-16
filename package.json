@@ -1,0 +1,19 @@
+{
+  "name": "udemy_project",
+  "version": "1.0.0",
+  "description": "project management ",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node index.js"
+  },
+  "keywords": [
+    "backend",
+    "apis"
+  ],
+  "author": "Digvijay",
+  "license": "ISC",
+  "devDependencies": {
+    "prettier": "3.8.0"
+  }
+}
