@@ -30,7 +30,7 @@ const registerUser = asyncHandler( async ( req, res) => {
         throw new ApiError(409, "User with same email or username already exist");
     }
 
-    const user = User.create({
+    const user = await User.create({
         email,
         password,
         username,
