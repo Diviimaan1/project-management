@@ -39,8 +39,8 @@ const registerUser = asyncHandler( async ( req, res) => {
 
     const { unHashedToken,hashedToken,tokenExpiry } = user.generateTemporaryToken();
 
-    (await user).emailVerificationExpiry = hashedToken;
-    (await user).emailVerificationToken = tokenExpiry;
+    (await user).emailVerificationExpiry = tokenExpiry;
+    (await user).emailVerificationToken = hashedToken;
 
     (await user).save({validateBeforeSave: false});
    
