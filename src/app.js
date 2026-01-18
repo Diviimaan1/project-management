@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 
 const app = express();
 
@@ -15,6 +16,7 @@ app.use(cors({
     methods:["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allowedHeaders:["Content-Type","Authorization"]
 }))
+app.use(cookieParser());
 
 //adding the healthcheck routes
 import healthCheckRouter from "./routes/healthcheck.routes.js";
