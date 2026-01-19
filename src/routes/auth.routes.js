@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { registerUser,login, logoutUser } from "../controllers/auth.controller.js";
+import { registerUser,login, logoutUser, getCurrentUser } from "../controllers/auth.controller.js";
 import { validate } from "../middlewares/validator.middleware.js";
 import { userRegisterValidator,userLoginValidator } from "../validators/index.js";
 import { verifyJwt } from "../middlewares/auth.middleware.js";
@@ -10,6 +10,8 @@ router.route("/register").post(userRegisterValidator(),validate, registerUser);
 router.route("/login").post(userLoginValidator(),validate, login);
 //secure routes
 router.route("/logout").post(verifyJwt,logoutUser);
+router.route("/current-user").get(verifyJwt,getCurrentUser);
+
 
 
 export default router
