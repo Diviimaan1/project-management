@@ -279,7 +279,7 @@ const removeProjectMember = asyncHandler(async(req,res)=>{
 })
 
 export {
-    getProject,
+    getProjects,
     getProjectById,
     getProjectMembers,
     createProject,
