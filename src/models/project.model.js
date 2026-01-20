@@ -9,7 +9,7 @@ const projectSchema = new Schema({
     description:{
         type:String,
     },
-    cretedBy:{
+    createdBy:{
         type:Schema.Types.ObjectId,
         ref:"User",
         required:true,
