@@ -24,6 +24,9 @@ export const uploadPdf = multer({
     storage: storage,
     fileFilter: fileFilter,
     limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB limit
+        fileSize: 10 * 1024 * 1024, // 10MB limit per file
     },
 });
+
+// Multi-file upload (up to 5 documents)
+export const uploadMultiplePdfs = uploadPdf.array("documents", 5);
