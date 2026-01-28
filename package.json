@@ -19,17 +19,23 @@
     "prettier": "3.8.0"
   },
   "dependencies": {
+    "@huggingface/inference": "^4.13.10",
+    "@langchain/community": "^1.1.8",
+    "@langchain/core": "^1.1.17",
+    "@langchain/openai": "^1.2.3",
+    "@langchain/qdrant": "^1.0.1",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
+    "dotenv": "^16.4.5",
     "express": "^5.2.1",
     "express-validator": "^7.3.1",
     "jsonwebtoken": "^9.0.3",
     "mailgen": "^2.0.32",
     "mongoose": "^8.21.0",
     "multer": "^2.0.2",
-    "nodemailer": "^7.0.12"
+    "nodemailer": "^7.0.12",
+    "pdf-parse": "^1.1.1"
   },
   "engines": {
     "node": ">=18 <=20"
