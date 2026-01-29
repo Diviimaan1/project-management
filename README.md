@@ -198,7 +198,7 @@ src/
 
 ---
 
-## 🔐 What This System Does / Doesn't Do
+## � What This System Does / Doesn't Do
 
 ### ✅ Does
 - Provide factual drug information from verified documents
