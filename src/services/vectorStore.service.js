@@ -2,126 +2,340 @@ import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { QdrantVectorStore } from "@langchain/qdrant";
 import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
 import fs from "fs";
+import crypto from "crypto";
 import { DocumentCategoryEnum } from "../utils/constants.js";
+import { MedicalDocument } from "../models/medicalDocument.model.js";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
-/**
- * Creates embeddings instance using HuggingFace
- * @returns {HuggingFaceInferenceEmbeddings}
- */
+const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
+const HF_TOKEN = process.env.HF_TOKEN;
+
+const VECTOR_SIZE = 768;
+const DISTANCE = "Cosine";
+const BATCH_SIZE = 32;
+
+
 function getEmbeddings() {
-    return new HuggingFaceInferenceEmbeddings({
-        apiKey: process.env.HF_TOKEN,
-        model: "BAAI/bge-base-en-v1.5",
+  return new HuggingFaceInferenceEmbeddings({
+    apiKey: process.env.HF_TOKEN,
+    model: "BAAI/bge-base-en-v1.5",
+  });
+}
+
+export function collectionForCategory(category) {
+  return `medical-${category.toLowerCase()}`;
+}
+
+function hashText(text) {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function formatPassage(text) {
+  return `Represent this passage for retrieval:\n${text}`;
+}
+
+function chunkArray(arr, size) {
+  const batches = [];
+  for (let i = 0; i < arr.length; i += size) {
+    batches.push(arr.slice(i, i + size));
+  }
+  return batches;
+}
+
+async function filterExistingByHash(collectionName, hashes) {
+  if (hashes.length === 0) return new Set();
+
+  const res = await fetch(
+    `${QDRANT_URL}/collections/${collectionName}/points/scroll`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filter: {
+          should: hashes.map(h => ({
+            key: "hash",
+            match: { value: h },
+          })),
+        },
+        limit: hashes.length,
+      }),
+    }
+  );
+
+  if (!res.ok) return new Set();
+
+  const data = await res.json();
+  return new Set(data.result.points.map(p => p.payload.hash));
+}
+
+
+async function ensureCollection(collectionName) {
+  const res = await fetch(`${QDRANT_URL}/collections/${collectionName}`);
+
+  if (res.status === 404) {
+    await fetch(`${QDRANT_URL}/collections/${collectionName}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vectors: {
+          size: VECTOR_SIZE,
+          distance: DISTANCE,
+        },
+      }),
     });
+  }
 }
 
-/**
- * Generate a collection name for medical documents
- * @param {string} category - Document category (APPROVAL/SAFETY/REIMBURSEMENT)
- * @returns {string}
- */
-export function generateCollectionName(category) {
-    return `medical-${category.toLowerCase()}-${Date.now()}`;
-}
 
-/**
- * Index a single PDF document into Qdrant vector store
- * @param {string} filepath - Path to the PDF file
- * @param {string} collectionName - Name for the Qdrant collection
- * @param {Object} metadata - Additional metadata (source, category)
- * @returns {Promise<{success: boolean, documentCount: number, collectionName: string}>}
- */
-export async function indexDocument(filepath, collectionName, metadata = {}) {
+export async function indexDocument({
+  filepath,
+  category,
+  documentName,
+  source,
+  uploadedBy,
+  description,
+}) {
+  const collectionName = collectionForCategory(category);
+
+  // 🔹 Ensure Mongo record exists (or create pending)
+  let docRecord = await MedicalDocument.findOne({
+    documentName,
+    category,
+    uploadedBy,
+  });
+
+  if (!docRecord) {
+    docRecord = await MedicalDocument.create({
+      documentName,
+      category,
+      collectionName,
+      source,
+      description,
+      uploadedBy,
+      indexing: { status: "pending" },
+    });
+  } else {
+    docRecord.indexing.status = "pending";
+    await docRecord.save();
+  }
+
+  try {
+    /* 1️⃣ Ensure Qdrant collection */
+    await ensureCollection(collectionName);
+
+    /* 2️⃣ Load PDF */
     const loader = new PDFLoader(filepath);
-    const docs = await loader.load();
+    const rawDocs = await loader.load();
 
-    // Enrich documents with additional metadata
-    const enrichedDocs = docs.map(doc => ({
-        ...doc,
-        metadata: {
-            ...doc.metadata,
-            source: metadata.source || "Unknown",
-            category: metadata.category || "GENERAL",
-            documentName: metadata.name || "Unnamed Document"
-        }
-    }));
-
-    const embeddings = getEmbeddings();
-    const qdrantUrl = process.env.QDRANT_URL || "http://localhost:6333";
-
-    await QdrantVectorStore.fromDocuments(enrichedDocs, embeddings, {
-        url: qdrantUrl,
-        collectionName: collectionName,
+    /* 3️⃣ Chunk */
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 500,
+      chunkOverlap: 80,
     });
 
-    // Clean up the uploaded file after indexing
-    fs.unlinkSync(filepath);
+    const chunks = await splitter.splitDocuments(rawDocs);
 
-    return {
-        success: true,
-        documentCount: docs.length,
-        collectionName: collectionName,
-    };
-}
+    /* 4️⃣ Normalize + hash */
+    const prepared = chunks.map((doc, idx) => {
+      const cleanText = doc.pageContent.replace(/\s+/g, " ").trim();
+      const hash = hashText(cleanText);
 
-/**
- * Index multiple PDF documents into Qdrant vector store
- * @param {Array<{filepath: string, name: string, source: string}>} files - Array of file info
- * @param {string} category - Document category
- * @returns {Promise<{success: boolean, results: Array}>}
- */
-export async function indexMultipleDocuments(files, category) {
-    const results = [];
-
-    for (const file of files) {
-        const collectionName = generateCollectionName(category);
-        try {
-            const result = await indexDocument(file.filepath, collectionName, {
-                source: file.source,
-                category: category,
-                name: file.name
-            });
-            results.push({
-                ...result,
-                name: file.name,
-                category: category
-            });
-        } catch (error) {
-            results.push({
-                success: false,
-                name: file.name,
-                error: error.message
-            });
-            // Clean up file on error
-            if (fs.existsSync(file.filepath)) {
-                fs.unlinkSync(file.filepath);
-            }
-        }
-    }
-
-    return {
-        success: results.every(r => r.success),
-        results: results
-    };
-}
-
-/**
- * Delete a collection from Qdrant
- * @param {string} collectionName - Name of the collection to delete
- * @returns {Promise<{success: boolean}>}
- */
-export async function deleteCollection(collectionName) {
-    const qdrantUrl = process.env.QDRANT_URL || "http://localhost:6333";
-
-    const response = await fetch(`${qdrantUrl}/collections/${collectionName}`, {
-        method: "DELETE",
+      return {
+        id: hash,
+        text: formatPassage(cleanText),
+        hash,
+        payload: {
+          documentName,
+          source,
+          category,
+          page: doc.metadata.loc?.pageNumber ?? null,
+          chunkIndex: idx,
+          hash,
+        },
+      };
     });
 
-    if (!response.ok) {
-        throw new Error(`Failed to delete collection: ${response.statusText}`);
+    /* 5️⃣ Deduplicate */
+    const existingHashes = await filterExistingByHash(
+      collectionName,
+      prepared.map(p => p.hash)
+    );
+
+    const newChunks = prepared.filter(
+      p => !existingHashes.has(p.hash)
+    );
+
+    /* 6️⃣ Manual batching + upsert */
+    const embedder = getEmbeddings();
+    const batches = chunkArray(newChunks, BATCH_SIZE);
+
+    for (const batch of batches) {
+      const vectors = await embedder.embedDocuments(
+        batch.map(b => b.text)
+      );
+      console.log("Embedding batch size:", vectors.length);
+      const points = batch.map((b, i) => ({
+        id: b.id,
+        vector: vectors[i],
+        payload: {
+            ...b.payload,
+            text: b.text, 
+        },
+      }));
+
+      await fetch(
+        `${QDRANT_URL}/collections/${collectionName}/points`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ points }),
+        }
+      );
     }
 
-    return { success: true };
+    console.log({
+    prepared: prepared.length,
+    existing: existingHashes.size,
+    newChunks: newChunks.length,
+    });
+
+
+    /* 7️⃣ Update Mongo (SUCCESS) */
+    docRecord.indexing = {
+      status: "indexed",
+      chunkCount: newChunks.length,
+      skippedChunks: existingHashes.size,
+      lastIndexedAt: new Date(),
+    };
+    await docRecord.save();
+
+    return {
+      success: true,
+      documentId: docRecord._id,
+      collectionName,
+      chunksIndexed: newChunks.length,
+      skipped: existingHashes.size,
+    };
+  } catch (error) {
+    /* ❌ Update Mongo (FAILURE) */
+    docRecord.indexing.status = "failed";
+    await docRecord.save();
+
+    throw error;
+  } finally {
+    /* 🧹 Cleanup */
+    if (fs.existsSync(filepath)) {
+      fs.unlinkSync(filepath);
+    }
+  }
+}
+
+export async function indexMultipleDocuments(
+  files,
+  category,
+  uploadedBy
+) {
+  const indexed = [];
+  const failed = [];
+
+  let totalIndexedChunks = 0;
+  let totalSkippedChunks = 0;
+
+  for (const file of files) {
+    try {
+      const result = await indexDocument({
+        filepath: file.filepath,
+        category,
+        documentName: file.name,
+        source: file.source,
+        description: file.description,
+        uploadedBy,
+      });
+
+      indexed.push({
+        documentId: result.documentId,
+        name: file.name,
+        chunksIndexed: result.chunksIndexed,
+        skipped: result.skipped ?? 0,
+      });
+
+      totalIndexedChunks += result.chunksIndexed || 0;
+      totalSkippedChunks += result.skipped || 0;
+
+    } catch (error) {
+      failed.push({
+        name: file.name,
+        error: error.message,
+      });
+
+      if (fs.existsSync(file.filepath)) {
+        fs.unlinkSync(file.filepath);
+      }
+    }
+  }
+
+  return {
+    success: failed.length === 0,
+    collectionName: `medical-${category.toLowerCase()}`,
+    summary: {
+      filesProcessed: files.length,
+      filesIndexed: indexed.length,
+      filesFailed: failed.length,
+      totalIndexedChunks,
+      totalSkippedChunks,
+    },
+    indexed,
+    failed,
+  };
+}
+
+export async function deleteDocument({
+  documentId,
+}) {
+  const qdrantUrl = process.env.QDRANT_URL || "http://localhost:6333";
+
+  const doc = await MedicalDocument.findById(documentId);
+  if (!doc) {
+    throw new Error("Document not found");
+  }
+
+  const { documentName, category } = doc;
+  const collectionName = `medical-${category.toLowerCase()}`;
+
+  /* 1️⃣ Delete from Qdrant */
+  const response = await fetch(
+    `${qdrantUrl}/collections/${collectionName}/points/delete`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filter: {
+          must: [
+            {
+              key: "documentName",
+              match: { value: documentName },
+            },
+          ],
+        },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to delete Qdrant vectors for "${documentName}"`
+    );
+  }
+
+  /* 2️⃣ Delete Mongo record */
+  await MedicalDocument.deleteOne({ _id: documentId });
+
+  return {
+    success: true,
+    documentId,
+    documentName,
+    collectionName,
+  };
 }
 
 /**
@@ -129,18 +343,43 @@ export async function deleteCollection(collectionName) {
  * @param {string} category - Document category
  * @returns {Promise<Array<string>>}
  */
-export async function getCollectionsByCategory(category) {
-    const qdrantUrl = process.env.QDRANT_URL || "http://localhost:6333";
+export async function getDocumentsByCategory(category) {
+  const qdrantUrl = process.env.QDRANT_URL || "http://localhost:6333";
+  const collectionName = `medical-${category.toLowerCase()}`;
 
-    const response = await fetch(`${qdrantUrl}/collections`);
-    if (!response.ok) {
-        throw new Error(`Failed to fetch collections: ${response.statusText}`);
+  const response = await fetch(
+    `${qdrantUrl}/collections/${collectionName}/points/scroll`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        limit: 1000,
+        with_payload: true,
+      }),
     }
+  );
 
-    const data = await response.json();
-    const prefix = `medical-${category.toLowerCase()}`;
+  if (!response.ok) {
+    throw new Error("Failed to fetch documents");
+  }
 
-    return data.result.collections
-        .map(c => c.name)
-        .filter(name => name.startsWith(prefix));
+  const data = await response.json();
+
+  // Extract unique documents
+  const documents = new Map();
+
+  for (const point of data.result.points) {
+    const { documentName, source } = point.payload;
+    if (!documents.has(documentName)) {
+      documents.set(documentName, {
+        documentName,
+        source,
+        category,
+      });
+    }
+  }
+
+  return Array.from(documents.values());
 }
+
+export async function deleteCollection() { }

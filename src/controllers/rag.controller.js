@@ -1,7 +1,7 @@
 import { asyncHandler } from "../utils/async-handler.js";
 import { ApiResponse } from "../utils/api-response.js";
 import { ApiError } from "../utils/api-error.js";
-import { indexDocument, deleteCollection, generateCollectionName } from "../services/vectorStore.service.js";
+import { indexDocument, deleteCollection, collectionForCategory } from "../services/vectorStore.service.js";
 import { chat, healthCheck } from "../services/retriever.service.js";
 import { MedicalDocument } from "../models/medicalDocument.model.js";
 import { AvailableDocumentCategories } from "../utils/constants.js";
@@ -21,24 +21,33 @@ const uploadDocument = asyncHandler(async (req, res) => {
         throw new ApiError(400, `Category is required. Valid values: ${AvailableDocumentCategories.join(", ")}`);
     }
 
-    const collectionName = generateCollectionName(category);
+    const collectionName = collectionForCategory(category);
 
-    const result = await indexDocument(req.file.path, collectionName, {
+    const result = await indexDocument({
+        filepath: req.file.path,
+        category,
+        documentName: req.file.originalname,
         source: source || "Unknown",
-        category: category,
-        name: req.file.originalname
+        description,
+        uploadedBy: req.user._id
     });
 
     // Save document metadata to MongoDB
-    const medicalDoc = await MedicalDocument.create({
-        name: req.file.originalname,
-        category: category,
-        collectionName: collectionName,
-        source: source || "Unknown",
-        description: description || "",
-        pageCount: result.documentCount,
-        uploadedBy: req.user._id
-    });
+    // Note: indexDocument already creates the record if it doesn't exist, but here we might be duplicating logic 
+    // or the controller wants to ensure the response has the doc. 
+    // However, indexDocument returns `{ success, documentId, ... }`
+    // Let's rely on indexDocument's return or fetch the created doc.
+    // But the original code created a MedicalDocument explicitly AFTER indexing.
+    // The service `indexDocument` ALSO creates/finds a MedicalDocument (lines 97-112 of service).
+    // The service implementation handles DB creation.
+    // So we should just use the result from indexDocument to fetch/return the doc.
+
+    // Wait, let's look at the original controller logic. It creates a document AFTER indexing. 
+    // But the service creates it BEFORE/DURING indexing. 
+    // Using the service effectively means we don't need to create it here again, or we might reference the one created.
+    // The Service returns `documentId`.
+
+    const medicalDoc = await MedicalDocument.findById(result.documentId);
 
     return res.status(201).json(
         new ApiResponse(201, {
@@ -67,22 +76,15 @@ const uploadMultipleDocuments = asyncHandler(async (req, res) => {
 
     for (const file of req.files) {
         try {
-            const collectionName = generateCollectionName(category);
-
-            const indexResult = await indexDocument(file.path, collectionName, {
+            const indexResult = await indexDocument({
+                filepath: file.path,
+                category,
+                documentName: file.originalname,
                 source: source || "Unknown",
-                category: category,
-                name: file.originalname
-            });
-
-            const medicalDoc = await MedicalDocument.create({
-                name: file.originalname,
-                category: category,
-                collectionName: collectionName,
-                source: source || "Unknown",
-                pageCount: indexResult.documentCount,
                 uploadedBy: req.user._id
             });
+
+            const medicalDoc = await MedicalDocument.findById(indexResult.documentId);
 
             results.push({
                 success: true,
